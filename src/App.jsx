@@ -1,11 +1,16 @@
 import React from 'react';
+import Papa from 'papaparse';
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} from 'recharts';
 
 // Firebase Imports
 import { initializeApp } from 'firebase/app';
 import { 
     getAuth, 
     signInAnonymously, 
-    onAuthStateChanged
+    onAuthStateChanged,
+    signInWithCustomToken
 } from 'firebase/auth';
 import { 
     getFirestore, 
@@ -19,12 +24,12 @@ import {
     setDoc,
     getDoc,
     addDoc,
-    deleteDoc,
-    writeBatch
+    updateDoc,
+    deleteDoc
 } from 'firebase/firestore';
 
 // Library Imports
-import { ArrowUpCircle, ArrowDownCircle, DollarSign, CreditCard, Banknote, Calendar, Tag, PlusCircle, Landmark, Upload, BarChart2, Trash2, Pencil, XCircle, CheckCircle } from 'lucide-react';
+import { ArrowUpCircle, ArrowDownCircle, DollarSign, CreditCard, Banknote, Calendar, Tag, PlusCircle, Landmark, Upload, BarChart2 } from 'lucide-react';
 
 // --- Firebase Configuration ---
 // This is your actual Firebase configuration object.
@@ -50,7 +55,8 @@ export default function App() {
     const [transactions, setTransactions] = React.useState([]);
     const [isLoading, setIsLoading] = React.useState(true);
     const [error, setError] = React.useState(null);
-    const [libsLoaded, setLibsLoaded] = React.useState(false);
+    const [editModalOpen, setEditModalOpen] = React.useState(false);
+    const [transactionToEdit, setTransactionToEdit] = React.useState(null);
 
     // --- Firebase Initialization (inside the component) ---
     const app = React.useMemo(() => initializeApp(firebaseConfig), []);
@@ -58,41 +64,6 @@ export default function App() {
     const db = React.useMemo(() => getFirestore(app), [app]);
 
     // --- Effects ---
-    // Effect for loading external libraries (PapaParse for CSV, Recharts for charts)
-    React.useEffect(() => {
-        const loadScript = (src, onLoad) => {
-            const script = document.createElement('script');
-            script.src = src;
-            script.async = true;
-            script.onload = onLoad;
-            document.body.appendChild(script);
-            return script;
-        };
-
-        let papaParseLoaded = false;
-        let rechartsLoaded = false;
-
-        const checkAllLoaded = () => {
-            if (papaParseLoaded && rechartsLoaded) {
-                setLibsLoaded(true);
-            }
-        };
-
-        const papaParseScript = loadScript('https://unpkg.com/papaparse@5.3.2/papaparse.min.js', () => {
-            papaParseLoaded = true;
-            checkAllLoaded();
-        });
-        const rechartsScript = loadScript('https://unpkg.com/recharts/umd/Recharts.min.js', () => {
-            rechartsLoaded = true;
-            checkAllLoaded();
-        });
-
-        return () => {
-            document.body.removeChild(papaParseScript);
-            document.body.removeChild(rechartsScript);
-        };
-    }, []);
-
     // Effect for Authentication
     React.useEffect(() => {
         const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -100,6 +71,7 @@ export default function App() {
                 setUserId(currentUser.uid);
             } else {
                 try {
+                    // For local development or environments without a token
                     await signInAnonymously(auth);
                 } catch (err) {
                     console.error("Authentication Error:", err);
@@ -117,6 +89,7 @@ export default function App() {
 
         setIsLoading(true);
 
+        // Listener for Accounts
         const accountsQuery = query(collection(db, `artifacts/${appId}/users/${userId}/accounts`), orderBy('name'));
         const unsubscribeAccounts = onSnapshot(accountsQuery, (snapshot) => {
             const fetchedAccounts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -128,12 +101,13 @@ export default function App() {
             setIsLoading(false);
         });
 
+        // Listener for Transactions
         const transactionsQuery = query(collection(db, `artifacts/${appId}/users/${userId}/transactions`), orderBy('date', 'desc'));
         const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
             const fetchedTransactions = snapshot.docs.map(doc => ({
                 id: doc.id,
                 ...doc.data(),
-                date: doc.data().date?.toDate()
+                date: doc.data().date?.toDate() // Convert Firestore Timestamp to JS Date
             }));
             setTransactions(fetchedTransactions);
         }, (err) => {
@@ -149,9 +123,13 @@ export default function App() {
 
     // --- Event Handlers ---
     const handleAddAccount = async (account) => {
-        if (!userId) return setError("You must be logged in to add an account.");
+        if (!userId) {
+            setError("You must be logged in to add an account.");
+            return;
+        }
         try {
-            await addDoc(collection(db, `artifacts/${appId}/users/${userId}/accounts`), account);
+            const accountsColRef = collection(db, `artifacts/${appId}/users/${userId}/accounts`);
+            await addDoc(accountsColRef, account);
         } catch (err) {
              console.error("Add Account Error:", err);
              setError("Failed to add new account.");
@@ -159,84 +137,88 @@ export default function App() {
     };
 
     const handleAddTransaction = async (transaction) => {
-        if (!userId) throw new Error("You must be logged in to add a transaction.");
+        if (!userId) {
+            throw new Error("You must be logged in to add a transaction.");
+        }
+
         const { accountId, amount, type, date, description, category } = transaction;
         const numericAmount = parseFloat(amount);
-        if (isNaN(numericAmount) || numericAmount <= 0) throw new Error("Transaction amount must be a positive number.");
+        
+        if (isNaN(numericAmount) || numericAmount <= 0) {
+            throw new Error("Transaction amount must be a positive number.");
+        }
 
         const amountToUpdate = type === 'inflow' ? numericAmount : -numericAmount;
         const accountRef = doc(db, `artifacts/${appId}/users/${userId}/accounts`, accountId);
         const transactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/transactions`);
 
-        await runTransaction(db, async (t) => {
-            const accountDoc = await t.get(accountRef);
-            if (!accountDoc.exists()) throw new Error("Account does not exist!");
-            const newBalance = accountDoc.data().balance + amountToUpdate;
-            t.update(accountRef, { balance: newBalance });
-            const newTransactionRef = doc(transactionsColRef);
-            t.set(newTransactionRef, { description, category, amount: numericAmount, type, accountId, date: Timestamp.fromDate(new Date(date)) });
-        });
-    };
-    
-    const handleDeleteTransaction = async (transactionToDelete) => {
-        if (!userId) return setError("You must be logged in.");
-        
-        const accountRef = doc(db, `artifacts/${appId}/users/${userId}/accounts`, transactionToDelete.accountId);
-        const transactionRef = doc(db, `artifacts/${appId}/users/${userId}/transactions`, transactionToDelete.id);
-        
-        const amountToReverse = transactionToDelete.type === 'inflow' ? -transactionToDelete.amount : transactionToDelete.amount;
-
         try {
             await runTransaction(db, async (t) => {
                 const accountDoc = await t.get(accountRef);
-                if (!accountDoc.exists()) throw new Error("Associated account not found.");
-                
-                const newBalance = accountDoc.data().balance + amountToReverse;
+                if (!accountDoc.exists()) {
+                    throw new Error("Account does not exist!");
+                }
+
+                const newBalance = accountDoc.data().balance + amountToUpdate;
                 t.update(accountRef, { balance: newBalance });
-                t.delete(transactionRef);
+                
+                const newTransactionRef = doc(transactionsColRef);
+                t.set(newTransactionRef, {
+                    description,
+                    category,
+                    amount: numericAmount,
+                    type,
+                    accountId,
+                    date: Timestamp.fromDate(new Date(date))
+                });
             });
+        } catch (err) {
+            console.error("Transaction Error:", err);
+            setError(`Failed to add transaction: ${err.message}`);
+            throw err; // Re-throw for the importer to catch
+        }
+    };
+
+    const handleEditTransaction = async (updatedTransaction) => {
+        if (!userId) {
+            setError("You must be logged in to edit a transaction.");
+            return;
+        }
+        try {
+            const transactionRef = doc(db, `artifacts/${appId}/users/${userId}/transactions`, updatedTransaction.id);
+            await updateDoc(transactionRef, {
+                description: updatedTransaction.description,
+                category: updatedTransaction.category,
+                amount: parseFloat(updatedTransaction.amount),
+                type: updatedTransaction.type,
+                accountId: updatedTransaction.accountId,
+                date: Timestamp.fromDate(new Date(updatedTransaction.date))
+            });
+            setEditModalOpen(false);
+            setTransactionToEdit(null);
+        } catch (err) {
+            console.error("Edit Transaction Error:", err);
+            setError("Failed to edit transaction.");
+        }
+    };
+
+    const handleDeleteTransaction = async (transactionId) => {
+        if (!userId) {
+            setError("You must be logged in to delete a transaction.");
+            return;
+        }
+        if (!window.confirm("Are you sure you want to delete this transaction?")) return;
+        try {
+            const transactionRef = doc(db, `artifacts/${appId}/users/${userId}/transactions`, transactionId);
+            await deleteDoc(transactionRef);
         } catch (err) {
             console.error("Delete Transaction Error:", err);
             setError("Failed to delete transaction.");
         }
     };
 
-    const handleUpdateTransaction = async (originalTx, updatedTxData) => {
-        if (!userId) return setError("You must be logged in.");
-
-        const batch = writeBatch(db);
-
-        const originalAccountRef = doc(db, `artifacts/${appId}/users/${userId}/accounts`, originalTx.accountId);
-        const originalAccountDoc = await getDoc(originalAccountRef);
-        if(!originalAccountDoc.exists()) throw new Error("Original account not found.");
-        const amountToRevert = originalTx.type === 'inflow' ? -originalTx.amount : originalTx.amount;
-        const originalAccountBalance = originalAccountDoc.data().balance + amountToRevert;
-        
-        const newAccountRef = doc(db, `artifacts/${appId}/users/${userId}/accounts`, updatedTxData.accountId);
-        const amountToAdd = updatedTxData.type === 'inflow' ? updatedTxData.amount : -updatedTxData.amount;
-        
-        if (originalTx.accountId === updatedTxData.accountId) {
-             batch.update(originalAccountRef, { balance: originalAccountBalance + amountToAdd });
-        } else {
-            batch.update(originalAccountRef, { balance: originalAccountBalance });
-            const newAccountDoc = await getDoc(newAccountRef);
-            if(!newAccountDoc.exists()) throw new Error("New account not found.");
-            const newAccountBalance = newAccountDoc.data().balance + amountToAdd;
-            batch.update(newAccountRef, { balance: newAccountBalance });
-        }
-
-        const transactionRef = doc(db, `artifacts/${appId}/users/${userId}/transactions`, originalTx.id);
-        batch.update(transactionRef, {
-            ...updatedTxData,
-            date: Timestamp.fromDate(new Date(updatedTxData.date))
-        });
-
-        await batch.commit();
-    };
-
-
     // --- Render Logic ---
-    if (!isAuthReady || isLoading || !libsLoaded) {
+    if (!isAuthReady || isLoading) {
         return <LoadingSpinner />;
     }
 
@@ -255,15 +237,23 @@ export default function App() {
                     <div className="lg:col-span-2">
                         <TransactionList 
                             transactions={transactions} 
-                            accounts={accounts}
-                            onDeleteTransaction={handleDeleteTransaction}
-                            onUpdateTransaction={handleUpdateTransaction}
+                            accounts={accounts} 
+                            onEdit={t => { setTransactionToEdit(t); setEditModalOpen(true); }}
+                            onDelete={handleDeleteTransaction}
                         />
                     </div>
                 </div>
                 <div className="mt-8">
                     <ExpenseChart transactions={transactions} />
                 </div>
+                {editModalOpen && transactionToEdit && (
+                    <EditTransactionModal 
+                        transaction={transactionToEdit} 
+                        accounts={accounts}
+                        onClose={() => { setEditModalOpen(false); setTransactionToEdit(null); }}
+                        onSave={handleEditTransaction}
+                    />
+                )}
             </div>
         </div>
     );
@@ -427,16 +417,12 @@ const CSVImporter = ({ accounts, onAddTransaction }) => {
             setImportError('Please select a file to import.');
             return;
         }
-        if (typeof window.Papa === 'undefined') {
-            setImportError('CSV parsing library is not available yet. Please wait a moment and try again.');
-            return;
-        }
 
         setIsImporting(true);
         setImportError('');
         setImportSuccess('');
 
-        window.Papa.parse(file, {
+        Papa.parse(file, {
             header: true,
             skipEmptyLines: true,
             complete: async (results) => {
@@ -679,22 +665,7 @@ const AddTransactionForm = ({ accounts, onAddTransaction }) => {
     );
 };
 
-const TransactionList = ({ transactions, accounts, onDeleteTransaction, onUpdateTransaction }) => {
-    const [editingId, setEditingId] = React.useState(null);
-    const [showDeleteModal, setShowDeleteModal] = React.useState(null);
-
-    const handleSave = (updatedTxData) => {
-        const originalTx = transactions.find(t => t.id === editingId);
-        onUpdateTransaction(originalTx, updatedTxData).then(() => {
-            setEditingId(null);
-        });
-    };
-
-    const handleDelete = () => {
-        onDeleteTransaction(showDeleteModal);
-        setShowDeleteModal(null);
-    };
-
+const TransactionList = ({ transactions, accounts, onEdit, onDelete }) => {
     const getAccountName = (id) => accounts.find(a => a.id === id)?.name || 'Unknown Account';
 
     if (transactions.length === 0) {
@@ -709,120 +680,48 @@ const TransactionList = ({ transactions, accounts, onDeleteTransaction, onUpdate
     return (
         <div className="bg-white p-6 rounded-xl shadow-md">
             <h3 className="text-xl font-semibold mb-4">Recent Transactions</h3>
-            <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
+            <div className="space-y-3" style={{ maxHeight: '600px', overflowY: 'auto' }}>
                 {transactions.map(t => (
-                    <div key={t.id}>
-                        {editingId === t.id ? (
-                            <EditTransactionForm 
-                                transaction={t} 
-                                accounts={accounts} 
-                                onSave={handleSave}
-                                onCancel={() => setEditingId(null)}
-                            />
-                        ) : (
-                            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg group">
-                                <div className="flex items-center gap-4">
-                                    {t.type === 'inflow'
-                                        ? <ArrowUpCircle className="w-6 h-6 text-green-500 flex-shrink-0" />
-                                        : <ArrowDownCircle className="w-6 h-6 text-red-500 flex-shrink-0" />
-                                    }
-                                    <div>
-                                        <p className="font-semibold text-gray-800">{t.description}</p>
-                                        <p className="text-sm text-gray-500">
-                                            <span className="font-medium bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full">{t.category}</span> 
-                                            <span className="mx-1">&bull;</span>
-                                            {getAccountName(t.accountId)} 
-                                            <span className="mx-1">&bull;</span>
-                                            {t.date?.toLocaleDateString()}
-                                        </p>
-                                    </div>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <p className={`font-semibold ${t.type === 'inflow' ? 'text-green-600' : 'text-red-600'}`}>
-                                        {t.type === 'inflow' ? '+' : '-'}${t.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    </p>
-                                    <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-                                        <button onClick={() => setEditingId(t.id)} className="p-1 text-gray-500 hover:text-blue-600"><Pencil size={16} /></button>
-                                        <button onClick={() => setShowDeleteModal(t)} className="p-1 text-gray-500 hover:text-red-600"><Trash2 size={16} /></button>
-                                    </div>
-                                </div>
+                    <div key={t.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center gap-4">
+                            {t.type === 'inflow'
+                                ? <ArrowUpCircle className="w-6 h-6 text-green-500" />
+                                : <ArrowDownCircle className="w-6 h-6 text-red-500" />
+                            }
+                            <div>
+                                <p className="font-semibold text-gray-800">{t.description}</p>
+                                <p className="text-sm text-gray-500">
+                                    <span className="font-medium bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full">{t.category}</span> 
+                                    <span className="mx-1">&bull;</span>
+                                    {getAccountName(t.accountId)} 
+                                    <span className="mx-1">&bull;</span>
+                                    {t.date?.toLocaleDateString()}
+                                </p>
                             </div>
-                        )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <p className={`font-semibold ${t.type === 'inflow' ? 'text-green-600' : 'text-red-600'}`}>
+                                {t.type === 'inflow' ? '+' : '-'}${t.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </p>
+                            <button
+                                className="ml-2 px-2 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                                onClick={() => onEdit(t)}
+                                title="Edit"
+                            >Edit</button>
+                            <button
+                                className="ml-1 px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
+                                onClick={() => onDelete(t.id)}
+                                title="Delete"
+                            >Delete</button>
+                        </div>
                     </div>
                 ))}
             </div>
-            {showDeleteModal && (
-                <Modal onClose={() => setShowDeleteModal(null)}>
-                    <h3 className="text-lg font-bold">Confirm Deletion</h3>
-                    <p className="py-4">Are you sure you want to delete this transaction? This action cannot be undone.</p>
-                    <p className="font-semibold">{showDeleteModal.description} (-${showDeleteModal.amount})</p>
-                    <div className="modal-action mt-4 flex justify-end gap-2">
-                        <button onClick={() => setShowDeleteModal(null)} className="px-4 py-2 bg-gray-200 rounded-md">Cancel</button>
-                        <button onClick={handleDelete} className="px-4 py-2 bg-red-600 text-white rounded-md">Delete</button>
-                    </div>
-                </Modal>
-            )}
         </div>
     );
 };
-
-const EditTransactionForm = ({ transaction, accounts, onSave, onCancel }) => {
-    const [formData, setFormData] = React.useState({
-        description: transaction.description,
-        category: transaction.category,
-        amount: transaction.type === 'inflow' ? transaction.amount : -transaction.amount,
-        accountId: transaction.accountId,
-        date: new Date(transaction.date).toISOString().slice(0, 10),
-    });
-
-    const handleChange = (e) => {
-        const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
-    };
-
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        const numericAmount = parseFloat(formData.amount);
-        if (isNaN(numericAmount) || numericAmount === 0) return;
-
-        const updatedTxData = {
-            description: formData.description,
-            category: formData.category,
-            amount: Math.abs(numericAmount),
-            type: numericAmount > 0 ? 'inflow' : 'outflow',
-            accountId: formData.accountId,
-            date: formData.date
-        };
-        onSave(updatedTxData);
-    };
-
-    return (
-        <form onSubmit={handleSubmit} className="p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
-            <input type="text" name="description" value={formData.description} onChange={handleChange} placeholder="Description" className="w-full p-2 border rounded-md" />
-            <input type="text" name="category" value={formData.category} onChange={handleChange} placeholder="Category" className="w-full p-2 border rounded-md" />
-            <input type="number" step="0.01" name="amount" value={formData.amount} onChange={handleChange} placeholder="Amount" className="w-full p-2 border rounded-md" />
-            <input type="date" name="date" value={formData.date} onChange={handleChange} className="w-full p-2 border rounded-md" />
-            <select name="accountId" value={formData.accountId} onChange={handleChange} className="w-full p-2 border rounded-md">
-                {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
-            </select>
-            <div className="flex justify-end gap-2">
-                <button type="button" onClick={onCancel} className="p-2 text-gray-600 hover:text-red-600"><XCircle /></button>
-                <button type="submit" className="p-2 text-gray-600 hover:text-green-600"><CheckCircle /></button>
-            </div>
-        </form>
-    );
-};
-
-const Modal = ({ children, onClose }) => (
-    <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex justify-center items-center">
-        <div className="bg-white p-6 rounded-lg shadow-xl">
-            {children}
-        </div>
-    </div>
-);
 
 const ExpenseChart = ({ transactions }) => {
-    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts || {};
     const [selectedYear, setSelectedYear] = React.useState(new Date().getFullYear());
 
     const availableYears = React.useMemo(() => {
@@ -856,14 +755,6 @@ const ExpenseChart = ({ transactions }) => {
     }, [transactions, selectedYear]);
 
     const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
-
-    if (!BarChart) {
-        return (
-            <div className="bg-white p-6 rounded-xl shadow-md text-center text-gray-500">
-                <p>Chart library is loading...</p>
-            </div>
-        );
-    }
 
     return (
         <div className="bg-white p-6 rounded-xl shadow-md">
@@ -919,3 +810,114 @@ const ErrorMessage = ({ message, onClose }) => (
         <button onClick={onClose} className="text-red-500 hover:text-red-700">&times;</button>
     </div>
 );
+
+const EditTransactionModal = ({ transaction, accounts, onClose, onSave }) => {
+    const [description, setDescription] = React.useState(transaction.description);
+    const [category, setCategory] = React.useState(transaction.category);
+    const [amount, setAmount] = React.useState(transaction.amount);
+    const [accountId, setAccountId] = React.useState(transaction.accountId);
+    const [date, setDate] = React.useState(transaction.date ? new Date(transaction.date).toISOString().slice(0, 10) : '');
+    const [type, setType] = React.useState(transaction.type);
+    const [formError, setFormError] = React.useState('');
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        setFormError('');
+        if (!description || !amount || !accountId || !date || !category) {
+            setFormError('All fields are required.');
+            return;
+        }
+        const numericAmount = parseFloat(amount);
+        if (isNaN(numericAmount) || numericAmount === 0) {
+            setFormError('Amount must be a non-zero number.');
+            return;
+        }
+        onSave({
+            ...transaction,
+            description,
+            category,
+            amount: Math.abs(numericAmount),
+            type,
+            accountId,
+            date
+        });
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+            <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-md relative">
+                <button onClick={onClose} className="absolute top-2 right-2 text-gray-400 hover:text-gray-600 text-2xl">&times;</button>
+                <h3 className="text-xl font-semibold mb-4">Edit Transaction</h3>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Description</label>
+                        <input
+                            type="text"
+                            value={description}
+                            onChange={e => setDescription(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Category</label>
+                        <input
+                            type="text"
+                            value={category}
+                            onChange={e => setCategory(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Amount</label>
+                        <input
+                            type="number"
+                            value={amount}
+                            onChange={e => setAmount(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                            step="0.01"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Type</label>
+                        <select
+                            value={type}
+                            onChange={e => setType(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        >
+                            <option value="inflow">Inflow</option>
+                            <option value="outflow">Outflow</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Date</label>
+                        <input
+                            type="date"
+                            value={date}
+                            onChange={e => setDate(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700">Account</label>
+                        <select
+                            value={accountId}
+                            onChange={e => setAccountId(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        >
+                            {accounts.map(acc => (
+                                <option key={acc.id} value={acc.id}>{acc.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                    {formError && <p className="text-sm text-red-600">{formError}</p>}
+                    <button
+                        type="submit"
+                        className="w-full bg-indigo-600 text-white py-2 px-4 rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                    >
+                        Save Changes
+                    </button>
+                </form>
+            </div>
+        </div>
+    );
+};
