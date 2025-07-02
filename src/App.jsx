@@ -22,12 +22,28 @@ import {
 import { ArrowUpCircle, ArrowDownCircle, DollarSign, CreditCard, Banknote, Calendar, Tag, PlusCircle, Landmark, Upload, BarChart2 } from 'lucide-react';
 
 // --- Firebase Configuration ---
-// NOTE: These variables are placeholders and will be populated by the environment.
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-    ? JSON.parse(__firebase_config) 
-    : { apiKey: "your-api-key", authDomain: "your-auth-domain", projectId: "your-project-id" };
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
 
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-finance-tracker';
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyDL1lkVb4TSEhuRtj63lTFVDGJP5rRUWFo",
+  authDomain: "expense-tracker-1d1c9.firebaseapp.com",
+  projectId: "expense-tracker-1d1c9",
+  storageBucket: "expense-tracker-1d1c9.firebasestorage.app",
+  messagingSenderId: "800926847850",
+  appId: "1:800926847850:web:34ef91739c02fec212cb13",
+  measurementId: "G-YRM6L2HDWE"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+
 
 // --- Main App Component ---
 export default function App() {
