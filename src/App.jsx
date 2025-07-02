@@ -57,7 +57,7 @@ export default function App() {
     const db = React.useMemo(() => getFirestore(app), [app]);
 
     // --- Effects ---
-    // Effect for loading external libraries
+    // Effect for loading external libraries (PapaParse for CSV, Recharts for charts)
     React.useEffect(() => {
         const loadScript = (src, onLoad) => {
             const script = document.createElement('script');
