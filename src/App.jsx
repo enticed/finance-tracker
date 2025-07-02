@@ -1,0 +1,775 @@
+import React from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+    getAuth, 
+    signInAnonymously, 
+    onAuthStateChanged,
+    signInWithCustomToken
+} from 'firebase/auth';
+import { 
+    getFirestore, 
+    doc, 
+    runTransaction, 
+    collection, 
+    onSnapshot,
+    query,
+    orderBy,
+    Timestamp,
+    setDoc,
+    getDoc,
+    addDoc
+} from 'firebase/firestore';
+import { ArrowUpCircle, ArrowDownCircle, DollarSign, CreditCard, Banknote, Calendar, Tag, PlusCircle, Landmark, Upload, BarChart2 } from 'lucide-react';
+
+// --- Firebase Configuration ---
+// NOTE: These variables are placeholders and will be populated by the environment.
+const firebaseConfig = typeof __firebase_config !== 'undefined' 
+    ? JSON.parse(__firebase_config) 
+    : { apiKey: "your-api-key", authDomain: "your-auth-domain", projectId: "your-project-id" };
+
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-finance-tracker';
+
+// --- Main App Component ---
+export default function App() {
+    // --- State Management ---
+    const [userId, setUserId] = React.useState(null);
+    const [isAuthReady, setIsAuthReady] = React.useState(false);
+    const [accounts, setAccounts] = React.useState([]);
+    const [transactions, setTransactions] = React.useState([]);
+    const [isLoading, setIsLoading] = React.useState(true);
+    const [error, setError] = React.useState(null);
+    const [isLibsLoaded, setIsLibsLoaded] = React.useState(false);
+
+    // --- Firebase Initialization ---
+    const app = React.useMemo(() => initializeApp(firebaseConfig), []);
+    const auth = React.useMemo(() => getAuth(app), [app]);
+    const db = React.useMemo(() => getFirestore(app), [app]);
+
+    // --- Effects ---
+    // Effect for loading external libraries
+    React.useEffect(() => {
+        const loadScript = (src, onLoad) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.async = true;
+            script.onload = onLoad;
+            document.body.appendChild(script);
+            return script;
+        };
+
+        let papaParseLoaded = false;
+        let rechartsLoaded = false;
+
+        const checkAllLoaded = () => {
+            if (papaParseLoaded && rechartsLoaded) {
+                setIsLibsLoaded(true);
+            }
+        };
+
+        const papaParseScript = loadScript('https://unpkg.com/papaparse@5.3.2/papaparse.min.js', () => {
+            papaParseLoaded = true;
+            checkAllLoaded();
+        });
+        const rechartsScript = loadScript('https://unpkg.com/recharts/umd/Recharts.min.js', () => {
+            rechartsLoaded = true;
+            checkAllLoaded();
+        });
+
+        return () => {
+            document.body.removeChild(papaParseScript);
+            document.body.removeChild(rechartsScript);
+        };
+    }, []);
+
+    // Effect for Authentication
+    React.useEffect(() => {
+        const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+            if (currentUser) {
+                setUserId(currentUser.uid);
+            } else {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (err) {
+                    console.error("Authentication Error:", err);
+                    setError("Failed to authenticate. Please refresh the page.");
+                }
+            }
+            setIsAuthReady(true);
+        });
+        return () => unsubscribe();
+    }, [auth]);
+
+    // Effect for Data Fetching
+    React.useEffect(() => {
+        if (!isAuthReady || !userId) return;
+
+        setIsLoading(true);
+
+        // Listener for Accounts
+        const accountsQuery = query(collection(db, `artifacts/${appId}/users/${userId}/accounts`), orderBy('name'));
+        const unsubscribeAccounts = onSnapshot(accountsQuery, (snapshot) => {
+            const fetchedAccounts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setAccounts(fetchedAccounts);
+            setIsLoading(false);
+        }, (err) => {
+            console.error("Firestore Accounts Error:", err);
+            setError("Failed to load account data.");
+            setIsLoading(false);
+        });
+
+        // Listener for Transactions
+        const transactionsQuery = query(collection(db, `artifacts/${appId}/users/${userId}/transactions`), orderBy('date', 'desc'));
+        const unsubscribeTransactions = onSnapshot(transactionsQuery, (snapshot) => {
+            const fetchedTransactions = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                date: doc.data().date?.toDate() // Convert Firestore Timestamp to JS Date
+            }));
+            setTransactions(fetchedTransactions);
+        }, (err) => {
+            console.error("Firestore Transactions Error:", err);
+            setError("Failed to load transaction data.");
+        });
+
+        return () => {
+            unsubscribeAccounts();
+            unsubscribeTransactions();
+        };
+    }, [isAuthReady, userId, db, appId]);
+
+    // --- Event Handlers ---
+    const handleAddAccount = async (account) => {
+        if (!userId) {
+            setError("You must be logged in to add an account.");
+            return;
+        }
+        try {
+            const accountsColRef = collection(db, `artifacts/${appId}/users/${userId}/accounts`);
+            await addDoc(accountsColRef, account);
+        } catch (err) {
+             console.error("Add Account Error:", err);
+             setError("Failed to add new account.");
+        }
+    };
+
+    const handleAddTransaction = async (transaction) => {
+        if (!userId) {
+            throw new Error("You must be logged in to add a transaction.");
+        }
+
+        const { accountId, amount, type, date, description, category } = transaction;
+        const numericAmount = parseFloat(amount);
+        
+        if (isNaN(numericAmount) || numericAmount <= 0) {
+            throw new Error("Transaction amount must be a positive number.");
+        }
+
+        const amountToUpdate = type === 'inflow' ? numericAmount : -numericAmount;
+        const accountRef = doc(db, `artifacts/${appId}/users/${userId}/accounts`, accountId);
+        const transactionsColRef = collection(db, `artifacts/${appId}/users/${userId}/transactions`);
+
+        try {
+            await runTransaction(db, async (t) => {
+                const accountDoc = await t.get(accountRef);
+                if (!accountDoc.exists()) {
+                    throw new Error("Account does not exist!");
+                }
+
+                const newBalance = accountDoc.data().balance + amountToUpdate;
+                t.update(accountRef, { balance: newBalance });
+                
+                const newTransactionRef = doc(transactionsColRef);
+                t.set(newTransactionRef, {
+                    description,
+                    category,
+                    amount: numericAmount,
+                    type,
+                    accountId,
+                    date: Timestamp.fromDate(new Date(date))
+                });
+            });
+        } catch (err) {
+            console.error("Transaction Error:", err);
+            setError(`Failed to add transaction: ${err.message}`);
+            throw err; // Re-throw for the importer to catch
+        }
+    };
+
+    // --- Render Logic ---
+    if (!isAuthReady || isLoading || !isLibsLoaded) {
+        return <LoadingSpinner />;
+    }
+
+    return (
+        <div className="bg-gray-50 min-h-screen font-sans text-gray-800">
+            <div className="container mx-auto p-4 md:p-8">
+                <Header userId={userId} />
+                {error && <ErrorMessage message={error} onClose={() => setError(null)} />}
+                <AccountSummaries accounts={accounts} />
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mt-8">
+                    <div className="lg:col-span-1 space-y-8">
+                        <AddAccountForm onAddAccount={handleAddAccount} />
+                        <CSVImporter accounts={accounts} onAddTransaction={handleAddTransaction} />
+                        <AddTransactionForm accounts={accounts} onAddTransaction={handleAddTransaction} />
+                    </div>
+                    <div className="lg:col-span-2">
+                        <TransactionList transactions={transactions} accounts={accounts} />
+                    </div>
+                </div>
+                <div className="mt-8">
+                    <ExpenseChart transactions={transactions} />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// --- Sub-components ---
+
+const Header = ({ userId }) => (
+    <header className="mb-8">
+        <h1 className="text-4xl font-bold text-gray-900 tracking-tight">Financial Dashboard</h1>
+        <p className="text-gray-500 mt-2">Welcome! Add accounts and track your transactions in one place.</p>
+        {userId && <p className="text-xs text-gray-400 mt-4">User ID: {userId}</p>}
+    </header>
+);
+
+const AccountSummaries = ({ accounts }) => {
+    if (accounts.length === 0) {
+        return (
+             <div className="bg-white p-6 rounded-xl shadow-md text-center text-gray-500">
+                <h2 className="text-xl font-semibold mb-2">Your Accounts</h2>
+                <p>No accounts found. Add your first account below to get started!</p>
+            </div>
+        )
+    }
+    return (
+        <div>
+            <h2 className="text-2xl font-bold text-gray-800 mb-4">Your Accounts</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {accounts.map(account => (
+                    <AccountCard key={account.id} account={account} />
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const getIconForAccount = (type) => {
+    switch(type) {
+        case 'checking': return <Banknote className="w-8 h-8 text-green-500" />;
+        case 'credit': return <CreditCard className="w-8 h-8 text-blue-500" />;
+        case 'savings': return <Landmark className="w-8 h-8 text-purple-500" />;
+        default: return <DollarSign className="w-8 h-8 text-gray-500" />;
+    }
+}
+
+const AccountCard = ({ account }) => {
+    if (!account) return null;
+    const balanceColor = account.balance >= 0 ? 'text-gray-800' : 'text-red-600';
+    return (
+        <div className="bg-white p-6 rounded-xl shadow-md transition-transform hover:scale-105">
+            <div className="flex items-center justify-between">
+                <div>
+                    <div className="flex items-center gap-4">
+                        <div className="bg-gray-100 p-3 rounded-full">{getIconForAccount(account.type)}</div>
+                        <h2 className="text-xl font-semibold text-gray-700">{account.name}</h2>
+                    </div>
+                </div>
+                <div className="text-right">
+                    <p className="text-sm text-gray-500 mb-1">Balance</p>
+                    <p className={`text-3xl font-bold ${balanceColor}`}>
+                        ${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const AddAccountForm = ({ onAddAccount }) => {
+    const [name, setName] = React.useState('');
+    const [balance, setBalance] = React.useState('');
+    const [type, setType] = React.useState('checking');
+    const [formError, setFormError] = React.useState('');
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        setFormError('');
+        if (!name.trim() || !balance.trim() || !type) {
+            setFormError('All fields are required.');
+            return;
+        }
+        onAddAccount({ name, balance: parseFloat(balance), type });
+        setName('');
+        setBalance('');
+    };
+
+    return (
+         <div className="bg-white p-6 rounded-xl shadow-md">
+            <h3 className="text-xl font-semibold mb-4">Add New Account</h3>
+            <form onSubmit={handleSubmit} className="space-y-4">
+                 <div>
+                    <label htmlFor="accountName" className="block text-sm font-medium text-gray-700">Account Name</label>
+                    <input
+                        type="text"
+                        id="accountName"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                        placeholder="e.g., My Checking"
+                    />
+                </div>
+                <div>
+                    <label htmlFor="initialBalance" className="block text-sm font-medium text-gray-700">Initial Balance</label>
+                     <div className="mt-1 relative rounded-md shadow-sm">
+                        <div className="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
+                            <DollarSign className="h-5 w-5 text-gray-400" />
+                        </div>
+                        <input
+                            type="number"
+                            id="initialBalance"
+                            value={balance}
+                            onChange={(e) => setBalance(e.target.value)}
+                            className="block w-full pl-10 pr-3 py-2 border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                            placeholder="0.00"
+                            step="0.01"
+                        />
+                    </div>
+                </div>
+                 <div>
+                    <label htmlFor="accountType" className="block text-sm font-medium text-gray-700">Account Type</label>
+                    <select
+                        id="accountType"
+                        value={type}
+                        onChange={(e) => setType(e.target.value)}
+                        className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                    >
+                        <option value="checking">Checking</option>
+                        <option value="savings">Savings</option>
+                        <option value="credit">Credit Card</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+                {formError && <p className="text-sm text-red-600">{formError}</p>}
+                <button
+                    type="submit"
+                    className="w-full flex justify-center items-center gap-2 bg-indigo-600 text-white py-2 px-4 rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                >
+                    <PlusCircle className="w-5 h-5" /> Add Account
+                </button>
+            </form>
+        </div>
+    );
+};
+
+const CSVImporter = ({ accounts, onAddTransaction }) => {
+    const [file, setFile] = React.useState(null);
+    const [isImporting, setIsImporting] = React.useState(false);
+    const [importError, setImportError] = React.useState('');
+    const [importSuccess, setImportSuccess] = React.useState('');
+
+    const handleFileChange = (event) => {
+        setImportError('');
+        setImportSuccess('');
+        if (event.target.files.length) {
+            setFile(event.target.files[0]);
+        }
+    };
+
+    const handleImport = () => {
+        if (!file) {
+            setImportError('Please select a file to import.');
+            return;
+        }
+        if (typeof window.Papa === 'undefined') {
+            setImportError('CSV parsing library is not available. Please refresh the page.');
+            return;
+        }
+
+        setIsImporting(true);
+        setImportError('');
+        setImportSuccess('');
+
+        window.Papa.parse(file, {
+            header: true,
+            skipEmptyLines: true,
+            complete: async (results) => {
+                const requiredHeaders = ['Account', 'Date', 'Source', 'Amount', 'Category'];
+                const actualHeaders = results.meta.fields;
+                const missingHeaders = requiredHeaders.filter(h => !actualHeaders.includes(h));
+
+                if (missingHeaders.length > 0) {
+                    setImportError(`CSV is missing required headers: ${missingHeaders.join(', ')}`);
+                    setIsImporting(false);
+                    return;
+                }
+
+                let successCount = 0;
+                let errorCount = 0;
+                let errors = [];
+
+                for (const [index, row] of results.data.entries()) {
+                    const accountName = row.Account?.trim();
+                    const account = accounts.find(a => a.name.toLowerCase() === accountName?.toLowerCase());
+
+                    if (!account) {
+                        errors.push(`Row ${index + 2}: Account "${accountName}" not found. Please create it first.`);
+                        errorCount++;
+                        continue;
+                    }
+
+                    const date = row.Date;
+                    const source = row.Source;
+                    const amount = parseFloat(row.Amount);
+                    const category = row.Category;
+
+                    if (!accountName || !date || !source || isNaN(amount) || !category) {
+                        errors.push(`Row ${index + 2}: Missing or invalid data.`);
+                        errorCount++;
+                        continue;
+                    }
+                    if (amount === 0) {
+                        errors.push(`Row ${index + 2}: Amount cannot be zero.`);
+                        errorCount++;
+                        continue;
+                    }
+                    
+                    const transaction = {
+                        accountId: account.id,
+                        date: date,
+                        description: source,
+                        amount: Math.abs(amount),
+                        category: category,
+                        type: amount > 0 ? 'inflow' : 'outflow',
+                    };
+
+                    try {
+                        await onAddTransaction(transaction);
+                        successCount++;
+                    } catch (e) {
+                        errors.push(`Row ${index + 2}: ${e.message}`);
+                        errorCount++;
+                    }
+                }
+
+                setImportSuccess(`Import complete! ${successCount} transactions imported.`);
+                if (errorCount > 0) {
+                    const errorSummary = errors.slice(0, 3).join(' ');
+                    setImportError(`${errorCount} rows failed to import. ${errorSummary}`);
+                }
+                setIsImporting(false);
+                if (document.getElementById('csvFile')) {
+                    document.getElementById('csvFile').value = '';
+                }
+                setFile(null);
+            },
+            error: (error) => {
+                setImportError(`CSV parsing failed: ${error.message}`);
+                setIsImporting(false);
+            }
+        });
+    };
+
+    return (
+        <div className="bg-white p-6 rounded-xl shadow-md">
+            <h3 className="text-xl font-semibold mb-4">Import from CSV</h3>
+            <div className="space-y-4">
+                <div>
+                    <label htmlFor="csvFile" className="block text-sm font-medium text-gray-700">CSV File</label>
+                    <p className="text-xs text-gray-500 mb-2">Headers: Account, Date, Source, Amount, Category</p>
+                    <input
+                        type="file"
+                        id="csvFile"
+                        accept=".csv,text/csv"
+                        onChange={handleFileChange}
+                        className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
+                    />
+                </div>
+                {importSuccess && <p className="text-sm text-green-600">{importSuccess}</p>}
+                {importError && <p className="text-sm text-red-600">{importError}</p>}
+                <button
+                    onClick={handleImport}
+                    disabled={isImporting || !file}
+                    className="w-full flex justify-center items-center gap-2 bg-teal-600 text-white py-2 px-4 rounded-md shadow-sm hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-teal-500 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                    <Upload className="w-5 h-5" />
+                    {isImporting ? 'Importing...' : 'Import Transactions'}
+                </button>
+            </div>
+        </div>
+    );
+};
+
+const AddTransactionForm = ({ accounts, onAddTransaction }) => {
+    const [description, setDescription] = React.useState('');
+    const [category, setCategory] = React.useState('');
+    const [amount, setAmount] = React.useState('');
+    const [accountId, setAccountId] = React.useState('');
+    const [date, setDate] = React.useState(new Date().toISOString().slice(0, 10));
+    const [formError, setFormError] = React.useState('');
+
+    React.useEffect(() => {
+        if (accounts.length > 0 && !accountId) {
+             setAccountId(accounts[0].id);
+        }
+    }, [accounts, accountId]);
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setFormError('');
+        if (!description || !amount || !accountId || !date || !category) {
+            setFormError('All fields are required.');
+            return;
+        }
+        
+        const numericAmount = parseFloat(amount);
+        if (isNaN(numericAmount) || numericAmount === 0) {
+            setFormError('Amount must be a non-zero number.');
+            return;
+        }
+
+        const transactionType = numericAmount > 0 ? 'inflow' : 'outflow';
+        const absoluteAmount = Math.abs(numericAmount);
+
+        try {
+            await onAddTransaction({ description, category, amount: absoluteAmount, type: transactionType, accountId, date });
+            setDescription('');
+            setAmount('');
+            setCategory('');
+        } catch(e) {
+            setFormError(e.message);
+        }
+    };
+
+    return (
+        <div className="bg-white p-6 rounded-xl shadow-md">
+            <h3 className="text-xl font-semibold mb-4">Add New Transaction</h3>
+            {accounts.length === 0 ? (
+                <p className="text-center text-gray-500">Please add an account before adding transactions.</p>
+            ) : (
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div>
+                        <label htmlFor="description" className="block text-sm font-medium text-gray-700">Merchant / Source</label>
+                        <input
+                            type="text"
+                            id="description"
+                            value={description}
+                            onChange={(e) => setDescription(e.target.value)}
+                            className="mt-1 block w-full px-3 py-2 bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                            placeholder="e.g., Amazon, Salary"
+                        />
+                    </div>
+                    <div>
+                        <label htmlFor="category" className="block text-sm font-medium text-gray-700">Category</label>
+                        <div className="mt-1 relative rounded-md shadow-sm">
+                            <div className="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
+                                <Tag className="h-5 w-5 text-gray-400" />
+                            </div>
+                            <input
+                                type="text"
+                                id="category"
+                                value={category}
+                                onChange={(e) => setCategory(e.target.value)}
+                                className="block w-full pl-10 pr-3 py-2 border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                                placeholder="e.g., Groceries, Utilities"
+                            />
+                        </div>
+                    </div>
+                    <div>
+                        <label htmlFor="amount" className="block text-sm font-medium text-gray-700">Amount (negative for expense)</label>
+                        <div className="mt-1 relative rounded-md shadow-sm">
+                            <div className="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
+                                <DollarSign className="h-5 w-5 text-gray-400" />
+                            </div>
+                            <input
+                                type="number"
+                                id="amount"
+                                value={amount}
+                                onChange={(e) => setAmount(e.target.value)}
+                                className="block w-full pl-10 pr-3 py-2 border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                                placeholder="e.g., -50.00 for expense"
+                                step="0.01"
+                            />
+                        </div>
+                    </div>
+                    <div>
+                        <label htmlFor="date" className="block text-sm font-medium text-gray-700">Date</label>
+                        <div className="mt-1 relative rounded-md shadow-sm">
+                            <div className="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
+                                <Calendar className="h-5 w-5 text-gray-400" />
+                            </div>
+                            <input
+                                type="date"
+                                id="date"
+                                value={date}
+                                onChange={(e) => setDate(e.target.value)}
+                                className="block w-full pl-10 pr-3 py-2 border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                            />
+                        </div>
+                    </div>
+                    <div>
+                        <label htmlFor="account" className="block text-sm font-medium text-gray-700">Account</label>
+                        <select
+                            id="account"
+                            value={accountId}
+                            onChange={(e) => setAccountId(e.target.value)}
+                            className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                        >
+                            {accounts.map(acc => (
+                                <option key={acc.id} value={acc.id}>{acc.name}</option>
+                            ))}
+                        </select>
+                    </div>
+                    {formError && <p className="text-sm text-red-600">{formError}</p>}
+                    <button
+                        type="submit"
+                        className="w-full bg-indigo-600 text-white py-2 px-4 rounded-md shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+                    >
+                        Add Transaction
+                    </button>
+                </form>
+            )}
+        </div>
+    );
+};
+
+const TransactionList = ({ transactions, accounts }) => {
+    const getAccountName = (id) => accounts.find(a => a.id === id)?.name || 'Unknown Account';
+
+    if (transactions.length === 0) {
+        return (
+            <div className="bg-white p-6 rounded-xl shadow-md text-center">
+                <h3 className="text-xl font-semibold mb-2">Recent Transactions</h3>
+                <p className="text-gray-500">No transactions yet. Add one to get started!</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="bg-white p-6 rounded-xl shadow-md">
+            <h3 className="text-xl font-semibold mb-4">Recent Transactions</h3>
+            <div className="space-y-3">
+                {transactions.map(t => (
+                    <div key={t.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                        <div className="flex items-center gap-4">
+                            {t.type === 'inflow'
+                                ? <ArrowUpCircle className="w-6 h-6 text-green-500" />
+                                : <ArrowDownCircle className="w-6 h-6 text-red-500" />
+                            }
+                            <div>
+                                <p className="font-semibold text-gray-800">{t.description}</p>
+                                <p className="text-sm text-gray-500">
+                                    <span className="font-medium bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full">{t.category}</span> 
+                                    <span className="mx-1">&bull;</span>
+                                    {getAccountName(t.accountId)} 
+                                    <span className="mx-1">&bull;</span>
+                                    {t.date?.toLocaleDateString()}
+                                </p>
+                            </div>
+                        </div>
+                        <p className={`font-semibold ${t.type === 'inflow' ? 'text-green-600' : 'text-red-600'}`}>
+                            {t.type === 'inflow' ? '+' : '-'}${t.amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </p>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+const ExpenseChart = ({ transactions }) => {
+    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts;
+    
+    const [selectedYear, setSelectedYear] = React.useState(new Date().getFullYear());
+
+    const availableYears = React.useMemo(() => {
+        const years = new Set(transactions.map(t => t.date.getFullYear()));
+        return Array.from(years).sort((a, b) => b - a);
+    }, [transactions]);
+
+    const chartData = React.useMemo(() => {
+        const expenseTransactions = transactions.filter(t => 
+            t.type === 'outflow' && t.date.getFullYear() === selectedYear
+        );
+
+        if (expenseTransactions.length === 0) return [];
+        
+        const categories = [...new Set(expenseTransactions.map(t => t.category))];
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        
+        const data = monthNames.map(monthName => ({ name: monthName }));
+
+        expenseTransactions.forEach(t => {
+            const monthIndex = t.date.getMonth();
+            const category = t.category;
+            if (!data[monthIndex][category]) {
+                data[monthIndex][category] = 0;
+            }
+            data[monthIndex][category] += t.amount;
+        });
+
+        return { data, categories };
+
+    }, [transactions, selectedYear]);
+
+    const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
+
+    return (
+        <div className="bg-white p-6 rounded-xl shadow-md">
+            <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-semibold flex items-center gap-2">
+                    <BarChart2 className="w-6 h-6 text-indigo-600" />
+                    Monthly Expense Breakdown
+                </h3>
+                {availableYears.length > 0 && (
+                    <select
+                        value={selectedYear}
+                        onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
+                        className="block pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                    >
+                        {availableYears.map(year => (
+                            <option key={year} value={year}>{year}</option>
+                        ))}
+                    </select>
+                )}
+            </div>
+            {chartData.data?.length > 0 ? (
+                <ResponsiveContainer width="100%" height={400}>
+                    <BarChart data={chartData.data} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="name" />
+                        <YAxis tickFormatter={(value) => `$${value.toLocaleString()}`} />
+                        <Tooltip formatter={(value, name) => [value.toLocaleString('en-US', { style: 'currency', currency: 'USD' }), name]} />
+                        <Legend />
+                        {chartData.categories.map((category, index) => (
+                            <Bar key={category} dataKey={category} stackId="a" fill={colors[index % colors.length]} />
+                        ))}
+                    </BarChart>
+                </ResponsiveContainer>
+            ) : (
+                <div className="text-center text-gray-500 py-16">
+                    <p>No expense data available for {selectedYear}.</p>
+                    <p className="text-sm">Add some expense transactions to see the chart.</p>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const LoadingSpinner = () => (
+    <div className="flex items-center justify-center min-h-screen bg-gray-50">
+        <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+    </div>
+);
+
+const ErrorMessage = ({ message, onClose }) => (
+    <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded-md shadow-md flex justify-between items-center">
+        <p>{message}</p>
+        <button onClick={onClose} className="text-red-500 hover:text-red-700">&times;</button>
+    </div>
+);
