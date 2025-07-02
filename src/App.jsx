@@ -1,4 +1,8 @@
 import React from 'react';
+import Papa from 'papaparse';
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} from 'recharts';
 
 // Firebase Imports
 import { initializeApp } from 'firebase/app';
@@ -49,7 +53,6 @@ export default function App() {
     const [transactions, setTransactions] = React.useState([]);
     const [isLoading, setIsLoading] = React.useState(true);
     const [error, setError] = React.useState(null);
-    const [isLibsLoaded, setIsLibsLoaded] = React.useState(false);
 
     // --- Firebase Initialization (inside the component) ---
     const app = React.useMemo(() => initializeApp(firebaseConfig), []);
@@ -57,41 +60,6 @@ export default function App() {
     const db = React.useMemo(() => getFirestore(app), [app]);
 
     // --- Effects ---
-    // Effect for loading external libraries (PapaParse for CSV, Recharts for charts)
-    React.useEffect(() => {
-        const loadScript = (src, onLoad) => {
-            const script = document.createElement('script');
-            script.src = src;
-            script.async = true;
-            script.onload = onLoad;
-            document.body.appendChild(script);
-            return script;
-        };
-
-        let papaParseLoaded = false;
-        let rechartsLoaded = false;
-
-        const checkAllLoaded = () => {
-            if (papaParseLoaded && rechartsLoaded) {
-                setIsLibsLoaded(true);
-            }
-        };
-
-        const papaParseScript = loadScript('https://unpkg.com/papaparse@5.3.2/papaparse.min.js', () => {
-            papaParseLoaded = true;
-            checkAllLoaded();
-        });
-        const rechartsScript = loadScript('https://unpkg.com/recharts/umd/Recharts.min.js', () => {
-            rechartsLoaded = true;
-            checkAllLoaded();
-        });
-
-        return () => {
-            document.body.removeChild(papaParseScript);
-            document.body.removeChild(rechartsScript);
-        };
-    }, []);
-
     // Effect for Authentication
     React.useEffect(() => {
         const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -208,7 +176,7 @@ export default function App() {
     };
 
     // --- Render Logic ---
-    if (!isAuthReady || isLoading || !isLibsLoaded) {
+    if (!isAuthReady || isLoading) {
         return <LoadingSpinner />;
     }
 
@@ -394,16 +362,12 @@ const CSVImporter = ({ accounts, onAddTransaction }) => {
             setImportError('Please select a file to import.');
             return;
         }
-        if (typeof window.Papa === 'undefined') {
-            setImportError('CSV parsing library is not available yet. Please wait a moment and try again.');
-            return;
-        }
 
         setIsImporting(true);
         setImportError('');
         setImportSuccess('');
 
-        window.Papa.parse(file, {
+        Papa.parse(file, {
             header: true,
             skipEmptyLines: true,
             complete: async (results) => {
@@ -691,7 +655,6 @@ const TransactionList = ({ transactions, accounts }) => {
 };
 
 const ExpenseChart = ({ transactions }) => {
-    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts || {};
     const [selectedYear, setSelectedYear] = React.useState(new Date().getFullYear());
 
     const availableYears = React.useMemo(() => {
@@ -725,14 +688,6 @@ const ExpenseChart = ({ transactions }) => {
     }, [transactions, selectedYear]);
 
     const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
-
-    if (!BarChart) {
-        return (
-            <div className="bg-white p-6 rounded-xl shadow-md text-center text-gray-500">
-                <p>Chart library is loading...</p>
-            </div>
-        );
-    }
 
     return (
         <div className="bg-white p-6 rounded-xl shadow-md">
