@@ -1,4 +1,6 @@
 import React from 'react';
+
+// Firebase Imports
 import { initializeApp } from 'firebase/app';
 import { 
     getAuth, 
@@ -19,31 +21,24 @@ import {
     getDoc,
     addDoc
 } from 'firebase/firestore';
+
+// Library Imports
 import { ArrowUpCircle, ArrowDownCircle, DollarSign, CreditCard, Banknote, Calendar, Tag, PlusCircle, Landmark, Upload, BarChart2 } from 'lucide-react';
 
 // --- Firebase Configuration ---
-// Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-import { getAnalytics } from "firebase/analytics";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+// This is your actual Firebase configuration object.
 const firebaseConfig = {
   apiKey: "AIzaSyDL1lkVb4TSEhuRtj63lTFVDGJP5rRUWFo",
   authDomain: "expense-tracker-1d1c9.firebaseapp.com",
   projectId: "expense-tracker-1d1c9",
-  storageBucket: "expense-tracker-1d1c9.firebasestorage.app",
+  storageBucket: "expense-tracker-1d1c9.appspot.com",
   messagingSenderId: "800926847850",
   appId: "1:800926847850:web:34ef91739c02fec212cb13",
   measurementId: "G-YRM6L2HDWE"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
-
+// Use the appId from your config for Firestore paths.
+const appId = firebaseConfig.appId;
 
 // --- Main App Component ---
 export default function App() {
@@ -56,7 +51,7 @@ export default function App() {
     const [error, setError] = React.useState(null);
     const [isLibsLoaded, setIsLibsLoaded] = React.useState(false);
 
-    // --- Firebase Initialization ---
+    // --- Firebase Initialization (inside the component) ---
     const app = React.useMemo(() => initializeApp(firebaseConfig), []);
     const auth = React.useMemo(() => getAuth(app), [app]);
     const db = React.useMemo(() => getFirestore(app), [app]);
@@ -104,11 +99,8 @@ export default function App() {
                 setUserId(currentUser.uid);
             } else {
                 try {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
+                    // For local development or environments without a token
+                    await signInAnonymously(auth);
                 } catch (err) {
                     console.error("Authentication Error:", err);
                     setError("Failed to authenticate. Please refresh the page.");
@@ -155,7 +147,7 @@ export default function App() {
             unsubscribeAccounts();
             unsubscribeTransactions();
         };
-    }, [isAuthReady, userId, db, appId]);
+    }, [isAuthReady, userId, db]);
 
     // --- Event Handlers ---
     const handleAddAccount = async (account) => {
@@ -403,7 +395,7 @@ const CSVImporter = ({ accounts, onAddTransaction }) => {
             return;
         }
         if (typeof window.Papa === 'undefined') {
-            setImportError('CSV parsing library is not available. Please refresh the page.');
+            setImportError('CSV parsing library is not available yet. Please wait a moment and try again.');
             return;
         }
 
@@ -699,8 +691,7 @@ const TransactionList = ({ transactions, accounts }) => {
 };
 
 const ExpenseChart = ({ transactions }) => {
-    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts;
-    
+    const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } = window.Recharts || {};
     const [selectedYear, setSelectedYear] = React.useState(new Date().getFullYear());
 
     const availableYears = React.useMemo(() => {
@@ -713,7 +704,7 @@ const ExpenseChart = ({ transactions }) => {
             t.type === 'outflow' && t.date.getFullYear() === selectedYear
         );
 
-        if (expenseTransactions.length === 0) return [];
+        if (expenseTransactions.length === 0) return { data: [], categories: [] };
         
         const categories = [...new Set(expenseTransactions.map(t => t.category))];
         const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -734,6 +725,14 @@ const ExpenseChart = ({ transactions }) => {
     }, [transactions, selectedYear]);
 
     const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
+
+    if (!BarChart) {
+        return (
+            <div className="bg-white p-6 rounded-xl shadow-md text-center text-gray-500">
+                <p>Chart library is loading...</p>
+            </div>
+        );
+    }
 
     return (
         <div className="bg-white p-6 rounded-xl shadow-md">
