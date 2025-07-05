@@ -1,3 +1,75 @@
-  @tailwind base;
-  @tailwind components;
-  @tailwind utilities;
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .form-input {
+    @apply mt-1 block w-full px-3 py-2 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 transition-colors duration-200;
+  }
+  
+  .form-input-light {
+    @apply bg-white border-gray-300 focus:ring-finance-500 focus:border-finance-500;
+  }
+  
+  .form-input-dark {
+    @apply bg-gray-700 border-gray-500 text-gray-100 focus:ring-finance-400 focus:border-finance-400 placeholder-gray-400;
+  }
+  
+  .form-label {
+    @apply block text-sm font-medium;
+  }
+  
+  .form-label-light {
+    @apply text-gray-700;
+  }
+  
+  .form-label-dark {
+    @apply text-gray-100;
+  }
+  
+  /* Modal-specific classes for larger inputs */
+  .modal-input {
+    @apply mt-1 block w-full px-4 py-3 border rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 transition-colors duration-200;
+  }
+  
+  .modal-input-light {
+    @apply bg-white border-gray-300 focus:ring-finance-500 focus:border-finance-500;
+  }
+  
+  .modal-input-dark {
+    @apply bg-gray-600 border-gray-500 text-gray-100 focus:ring-finance-400 focus:border-finance-400 placeholder-gray-400;
+  }
+  
+  /* Common button classes */
+  .btn-primary {
+    @apply w-full flex justify-center items-center gap-2 text-white py-2 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 transition-colors;
+  }
+  
+  .btn-primary-light {
+    @apply bg-finance-600 hover:bg-finance-700 focus:ring-finance-500;
+  }
+  
+  .btn-primary-dark {
+    @apply bg-gray-500 hover:bg-gray-600 focus:ring-gray-400;
+  }
+  
+  .btn-secondary {
+    @apply px-2 py-1 text-xs rounded hover:opacity-80 transition-opacity;
+  }
+  
+  .btn-edit {
+    @apply bg-blue-100 text-blue-700 hover:bg-blue-200;
+  }
+  
+  .btn-edit-dark {
+    @apply bg-blue-400 text-blue-900 hover:bg-blue-300;
+  }
+  
+  .btn-delete {
+    @apply bg-red-100 text-red-700 hover:bg-red-200;
+  }
+  
+  .btn-delete-dark {
+    @apply bg-red-400 text-red-900 hover:bg-red-300;
+  }
+}
